@@ -1,18 +1,19 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as api_router
-from app.models.database import Base, engine
-from app.api.websocket import router as websocket_router
+from app.api.websocket import router as ws_router
 
-# Create FastAPI app FIRST
 app = FastAPI(title="Sentiment Analysis Platform")
 
-# Include API routes
-app.include_router(api_router)
-app.include_router(websocket_router)
+# 🔥 ABSOLUTE CORS OVERRIDE (TEMPORARY, FOR DEBUGGING)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Create tables on startup
-@app.on_event("startup")
-async def startup_event():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+app.include_router(api_router)
+app.include_router(ws_router)
