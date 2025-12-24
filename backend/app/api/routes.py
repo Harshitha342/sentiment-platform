@@ -1,20 +1,21 @@
-from fastapi import APIRouter, status, Query
+from fastapi import APIRouter, Query, status
 from datetime import datetime, timedelta
 from typing import Optional
+import json
+import os
 
-from sqlalchemy import text, select, func, case
+from sqlalchemy import select, func, text
 from app.models.database import async_session_maker
 from app.models.social_media_post import SocialMediaPost
 from app.models.sentiment_analysis import SentimentAnalysis
 
 import redis.asyncio as redis
-import os
 
-#ONE router only
+# ✅ ONE router, ONE prefix
 router = APIRouter(prefix="/api", tags=["api"])
 
 # =====================================================
-# Health Check Endpoint
+# 1. Health Check
 # =====================================================
 @router.get("/health", status_code=200)
 async def health_check():
@@ -29,20 +30,18 @@ async def health_check():
 
     try:
         async with async_session_maker() as session:
-            total_posts = (await session.execute(
+            total_posts = await session.scalar(
                 text("SELECT COUNT(*) FROM social_media_posts")
-            )).scalar()
-
-            total_analyses = (await session.execute(
+            )
+            total_analyses = await session.scalar(
                 text("SELECT COUNT(*) FROM sentiment_analysis")
-            )).scalar()
-
-            recent_posts_1h = (await session.execute(
+            )
+            recent_posts_1h = await session.scalar(
                 text("""
                     SELECT COUNT(*) FROM social_media_posts
                     WHERE created_at >= NOW() - INTERVAL '1 hour'
                 """)
-            )).scalar()
+            )
     except Exception:
         db_status = "disconnected"
 
@@ -77,9 +76,8 @@ async def health_check():
         }
     }
 
-
 # =====================================================
-# Get Posts Endpoint
+# 2. Get Posts
 # =====================================================
 @router.get("/posts")
 async def get_posts(
@@ -101,15 +99,19 @@ async def get_posts(
 
         if source:
             stmt = stmt.where(SocialMediaPost.source == source)
+
         if sentiment:
             stmt = stmt.where(SentimentAnalysis.sentiment_label == sentiment)
+
         if start_date:
             stmt = stmt.where(SocialMediaPost.created_at >= start_date)
+
         if end_date:
             stmt = stmt.where(SocialMediaPost.created_at <= end_date)
 
-        count_stmt = select(func.count()).select_from(stmt.subquery())
-        total = await session.scalar(count_stmt)
+        total = await session.scalar(
+            select(func.count()).select_from(stmt.subquery())
+        )
 
         stmt = (
             stmt
@@ -149,41 +151,43 @@ async def get_posts(
             }
         }
 
-
 # =====================================================
-# Sentiment Aggregate Endpoint (PHASE 4.1 — ENDPOINT 3)
+# 3. Sentiment Distribution
 # =====================================================
-@router.get("/sentiment/aggregate")
-async def get_sentiment_aggregate(
-    period: str = Query(..., pattern="^(minute|hour|day)$"),
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
+@router.get("/sentiment/distribution")
+async def get_sentiment_distribution(
+    hours: int = Query(24, ge=1, le=168),
     source: Optional[str] = None,
 ):
-    if not end_date:
-        end_date = datetime.utcnow()
-    if not start_date:
-        start_date = end_date - timedelta(hours=24)
+    now = datetime.utcnow()
+    start_time = now - timedelta(hours=hours)
 
-    bucket = func.date_trunc(period, SocialMediaPost.created_at)
+    cache_key = f"sentiment_distribution:{hours}:{source or 'all'}"
+
+    redis_client = redis.Redis(
+        host=os.getenv("REDIS_HOST", "redis"),
+        port=int(os.getenv("REDIS_PORT", 6379)),
+        decode_responses=True
+    )
+
+    cached = await redis_client.get(cache_key)
+    if cached:
+        data = json.loads(cached)
+        data["cached"] = True
+        return data
 
     async with async_session_maker() as session:
         stmt = (
             select(
-                bucket.label("timestamp"),
-                func.count().label("total"),
-                func.sum(case((SentimentAnalysis.sentiment_label == "positive", 1), else_=0)).label("positive"),
-                func.sum(case((SentimentAnalysis.sentiment_label == "negative", 1), else_=0)).label("negative"),
-                func.sum(case((SentimentAnalysis.sentiment_label == "neutral", 1), else_=0)).label("neutral"),
-                func.avg(SentimentAnalysis.confidence_score).label("avg_confidence"),
+                SentimentAnalysis.sentiment_label,
+                func.count()
             )
-            .join(SentimentAnalysis, SocialMediaPost.post_id == SentimentAnalysis.post_id)
-            .where(
-                SocialMediaPost.created_at >= start_date,
-                SocialMediaPost.created_at <= end_date
+            .join(
+                SocialMediaPost,
+                SocialMediaPost.post_id == SentimentAnalysis.post_id
             )
-            .group_by("timestamp")
-            .order_by("timestamp")
+            .where(SocialMediaPost.created_at >= start_time)
+            .group_by(SentimentAnalysis.sentiment_label)
         )
 
         if source:
@@ -191,37 +195,27 @@ async def get_sentiment_aggregate(
 
         rows = (await session.execute(stmt)).all()
 
-    data = []
-    summary = {
-        "total_posts": 0,
-        "positive_total": 0,
-        "negative_total": 0,
-        "neutral_total": 0,
+        distribution = {"positive": 0, "negative": 0, "neutral": 0}
+        total = 0
+
+        for label, count in rows:
+            distribution[label] = count
+            total += count
+
+        percentages = {
+            k: round((v / total) * 100, 2) if total else 0.0
+            for k, v in distribution.items()
+        }
+
+    response = {
+        "timeframe_hours": hours,
+        "source": source,
+        "distribution": distribution,
+        "total": total,
+        "percentages": percentages,
+        "cached": False,
+        "cached_at": now.isoformat() + "Z"
     }
 
-    for r in rows:
-        total = r.total or 0
-        data.append({
-            "timestamp": r.timestamp.isoformat(),
-            "positive_count": r.positive,
-            "negative_count": r.negative,
-            "neutral_count": r.neutral,
-            "total_count": total,
-            "positive_percentage": round((r.positive / total) * 100, 2) if total else 0,
-            "negative_percentage": round((r.negative / total) * 100, 2) if total else 0,
-            "neutral_percentage": round((r.neutral / total) * 100, 2) if total else 0,
-            "average_confidence": round(r.avg_confidence or 0, 4)
-        })
-
-        summary["total_posts"] += total
-        summary["positive_total"] += r.positive
-        summary["negative_total"] += r.negative
-        summary["neutral_total"] += r.neutral
-
-    return {
-        "period": period,
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
-        "data": data,
-        "summary": summary
-    }
+    await redis_client.setex(cache_key, 60, json.dumps(response))
+    return response
