@@ -1,15 +1,16 @@
-import os
 from fastapi import FastAPI
-from sqlalchemy import create_engine
-from app.models.database import Base
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+from app.api.routes import router as api_router
+from app.models.database import Base, engine
 
-engine = create_engine(DATABASE_URL)
-Base.metadata.create_all(bind=engine)
+# Create FastAPI app FIRST
+app = FastAPI(title="Sentiment Analysis Platform")
 
-app = FastAPI()
+# Include API routes
+app.include_router(api_router)
 
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
+# Create tables on startup
+@app.on_event("startup")
+async def startup_event():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)

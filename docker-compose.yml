@@ -4,17 +4,18 @@ services:
   postgres:
     image: postgres:15
     container_name: sentiment-postgres
-    restart: always
-    env_file:
-      - .env
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d
+    environment:
+      POSTGRES_USER: sentiment_user
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: sentiment_db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U sentiment_user"]
+      interval: 5s
       timeout: 5s
       retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
 
 
   redis:

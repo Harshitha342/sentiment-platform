@@ -6,6 +6,11 @@ torch==2.1.2+cpu
 transformers==4.36.2
 
 fastapi
-uvicorn
-sqlalchemy
-psycopg2-binary
+uvicorn[standard]
+sqlalchemy>=2.0
+asyncpg
+redis
+pydantic
+python-dotenv
+
+
