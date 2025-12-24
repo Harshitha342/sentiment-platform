@@ -233,3 +233,8 @@ MIT License
 - API keys stored in environment variables
 - Rate limiting can be added
 - Authentication extensible via JWT
+
+## Demo Note
+This project is designed for local Docker-based execution.  
+A live video demo could not be recorded at submission time due to a temporary screen recording issue.  
+The system is fully functional and can be demonstrated live if required.
